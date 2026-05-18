@@ -1,0 +1,106 @@
+services:
+
+  # ── Airflow 메타데이터 DB ───────────────────────────────────────────────────
+  airflow-db:
+    image: postgres:15
+    container_name: mydobby-airflow-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - airflow_db:/var/lib/postgresql/data
+    networks:
+      - mydobby-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Airflow 초기화 (최초 1회) ───────────────────────────────────────────────
+  airflow-init:
+    image: apache/airflow:2.9.1
+    container_name: mydobby-airflow-init
+    depends_on:
+      airflow-db:
+        condition: service_healthy
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-db:5432/airflow
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-}
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      _AIRFLOW_DB_MIGRATE: "true"
+      _AIRFLOW_WWW_USER_CREATE: "true"
+      _AIRFLOW_WWW_USER_USERNAME: ${AIRFLOW_USER:-admin}
+      _AIRFLOW_WWW_USER_PASSWORD: ${AIRFLOW_PASSWORD:-admin}
+    volumes:
+      - ../airflow/dags:/opt/airflow/dags
+      - airflow_logs:/opt/airflow/logs
+    entrypoint: /bin/bash
+    command: -c "airflow db migrate && airflow users create --username $$_AIRFLOW_WWW_USER_USERNAME --password $$_AIRFLOW_WWW_USER_PASSWORD --firstname Admin --lastname Admin --role Admin --email admin@example.com || true"
+    networks:
+      - mydobby-net
+
+  # ── Airflow 웹서버 ───────────────────────────────────────────────────────────
+  airflow-webserver:
+    image: apache/airflow:2.9.1
+    container_name: mydobby-airflow-webserver
+    restart: unless-stopped
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    ports:
+      - "8080:8080"
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-db:5432/airflow
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-}
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_SECRET_KEY:-changeme}
+      PYTHONPATH: /opt/mydobby
+    volumes:
+      - ../airflow/dags:/opt/airflow/dags
+      - airflow_logs:/opt/airflow/logs
+      - ..:/opt/mydobby          # 프로젝트 소스 마운트 (DAG에서 import용)
+      - ../.env:/opt/mydobby/.env:ro
+    command: webserver
+    networks:
+      - mydobby-net
+
+  # ── Airflow 스케줄러 ─────────────────────────────────────────────────────────
+  airflow-scheduler:
+    image: apache/airflow:2.9.1
+    container_name: mydobby-airflow-scheduler
+    restart: unless-stopped
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-db:5432/airflow
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-}
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      PYTHONPATH: /opt/mydobby
+      # 서비스 접속 주소는 docker network 내부 주소로 오버라이드
+      QDRANT_URL: http://qdrant:6333
+      MONGO_URL: mongodb://${MONGO_USER:-root}:${MONGO_PASSWORD:-1234}@mongodb:27017/
+      LANGFUSE_HOST: http://langfuse:3000
+    volumes:
+      - ../airflow/dags:/opt/airflow/dags
+      - airflow_logs:/opt/airflow/logs
+      - ..:/opt/mydobby
+      - ../.env:/opt/mydobby/.env:ro
+      - ../sft:/opt/mydobby/sft:ro   # 모델 파일 마운트
+    command: scheduler
+    networks:
+      - mydobby-net
+
+volumes:
+  airflow_db:
+  airflow_logs:
+
+networks:
+  mydobby-net:
+    external: true   # docker-compose.yaml에서 생성한 네트워크 공유
